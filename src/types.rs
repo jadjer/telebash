@@ -1,22 +1,19 @@
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+pub type Id = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub telegram_token: String,
-    pub auth_file_path: String,
+    pub users_file_path: String,
     pub log_file_path: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthorizedUser {
-    pub user_id: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct UserSession {
-    pub current_dir: PathBuf,
-    pub user_id: i64,
+pub struct AuthorizedUsers {
+    pub users: HashSet<Id>,
 }
 
 #[derive(Debug, Clone)]

@@ -3,7 +3,7 @@ use crate::commands::Command;
 use crate::errors::BotError;
 use crate::file_manager::FileManager;
 use crate::log_manager::LogManager;
-use crate::types::Config;
+use crate::types::{Config, Id};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
@@ -63,43 +63,44 @@ impl BotManager {
         file_manager: Arc<Mutex<FileManager>>,
         log_manager: Arc<LogManager>,
     ) -> Result<(), BotError> {
-        let user_id = msg.chat.id.0;
-        let username = msg.chat.username().map(|s| s.to_string());
+        if let Some(user) = &msg.from {
+            let user_id = user.id.0;
 
-        match cmd {
-            Command::Help => {
-                Self::handle_help(bot, msg, &auth_manager).await?;
-            }
-            Command::AuthRequest => {
-                Self::handle_auth(bot, msg, auth_manager, log_manager).await?;
-            }
-            Command::Auth(code) => {
-                Self::handle_auth_code(bot, msg, code, auth_manager, log_manager).await?;
-            }
-            _ => {
-                if auth_manager.lock().await.is_authorized(user_id) {
-                    match cmd {
-                        Command::Ls => {
-                            Self::handle_ls(bot, msg, file_manager).await?;
+            match cmd {
+                Command::Help => {
+                    Self::handle_help(bot, msg, user_id, &auth_manager).await?;
+                }
+                Command::AuthRequest => {
+                    Self::handle_auth(bot, msg,  user_id, auth_manager, log_manager).await?;
+                }
+                Command::Auth(code) => {
+                    Self::handle_auth_code(bot, msg, code, user_id, auth_manager, log_manager).await?;
+                }
+                _ => {
+                    if auth_manager.lock().await.is_authorized(user_id) {
+                        match cmd {
+                            Command::Ls => {
+                                Self::handle_ls(bot, msg, user_id, file_manager).await?;
+                            }
+                            Command::Cd(path) => {
+                                Self::handle_cd(bot, msg, path, user_id, file_manager).await?;
+                            }
+                            Command::Download(filename) => {
+                                Self::handle_download(bot, msg, filename, user_id, file_manager).await?;
+                            }
+                            Command::Exec(command) => {
+                                Self::handle_exec(bot, msg, command, user_id, file_manager).await?;
+                            }
+                            Command::Pwd => {
+                                Self::handle_pwd(bot, msg, user_id, file_manager).await?;
+                            }
+                            _ => {}
                         }
-                        Command::Cd(path) => {
-                            Self::handle_cd(bot, msg, path, file_manager).await?;
-                        }
-                        Command::Download(filename) => {
-                            Self::handle_download(bot, msg, filename, file_manager).await?;
-                        }
-                        Command::Exec(command) => {
-                            Self::handle_exec(bot, msg, command, file_manager).await?;
-                        }
-                        Command::Pwd => {
-                            Self::handle_pwd(bot, msg, file_manager).await?;
-                        }
-                        _ => {}
+                    } else {
+                        bot.send_message(msg.chat.id, "❌ Unauthorized. Use /auth to get access.")
+                            .await
+                            .map_err(|e| BotError::TelegramError(e.to_string()))?;
                     }
-                } else {
-                    bot.send_message(msg.chat.id, "❌ Unauthorized. Use /auth to get access.")
-                        .await
-                        .map_err(|e| BotError::TelegramError(e.to_string()))?;
                 }
             }
         }
@@ -108,11 +109,11 @@ impl BotManager {
     }
 
     async fn handle_help(
-        bot: teloxide::Bot,
+        bot: Bot,
         msg: Message,
+        user_id: Id,
         auth_manager: &Arc<Mutex<AuthManager>>,
     ) -> Result<(), BotError> {
-        let user_id = msg.chat.id.0;
         let is_authorized = auth_manager.lock().await.is_authorized(user_id);
 
         let help_text = if is_authorized {
@@ -139,12 +140,10 @@ impl BotManager {
     async fn handle_auth(
         bot: teloxide::Bot,
         msg: Message,
+        user_id: Id,
         auth_manager: Arc<Mutex<AuthManager>>,
         log_manager: Arc<LogManager>,
     ) -> Result<(), BotError> {
-        let user_id = msg.chat.id.0;
-        let username = msg.chat.username().map(|s| s.to_string());
-
         let mut auth_manager = auth_manager.lock().await;
 
         if auth_manager.is_authorized(user_id) {
@@ -177,15 +176,13 @@ impl BotManager {
     }
 
     async fn handle_auth_code(
-        bot: teloxide::Bot,
+        bot: Bot,
         msg: Message,
         code: String,
+        user_id: Id,
         auth_manager: Arc<Mutex<AuthManager>>,
         log_manager: Arc<LogManager>,
     ) -> Result<(), BotError> {
-        let user_id = msg.chat.id.0;
-        let username = msg.chat.username().map(|s| s.to_string());
-
         let mut auth_manager = auth_manager.lock().await;
 
         if auth_manager.is_authorized(user_id) {
@@ -195,7 +192,7 @@ impl BotManager {
             return Ok(());
         }
 
-        let is_verified = match auth_manager.verify_access_code(&code, user_id, username) {
+        let is_verified = match auth_manager.verify_access_code(&code, user_id) {
             Ok(_) => {}
             Err(_) => {}
         };
@@ -239,10 +236,11 @@ impl BotManager {
     async fn handle_ls(
         bot: Bot,
         msg: Message,
+        user_id: Id,
         file_manager: Arc<Mutex<FileManager>>,
     ) -> Result<(), BotError> {
         let file_manager = file_manager.lock().await;
-        let items = file_manager.list_directory()?;
+        let items = file_manager.list_directory(user_id)?;
 
         if items.is_empty() {
             bot.send_message(msg.chat.id, "📁 Directory is empty")
@@ -305,7 +303,7 @@ impl BotManager {
             keyboard.push(current_row);
         }
 
-        let current_directory = file_manager.get_current_directory();
+        let current_directory = file_manager.get_current_directory(user_id);
 
         // Add navigation buttons
         if current_directory.parent().is_some() {
@@ -333,13 +331,14 @@ impl BotManager {
         bot: Bot,
         msg: Message,
         path: String,
+        user_id: Id,
         file_manager: Arc<Mutex<FileManager>>,
     ) -> Result<(), BotError> {
         let mut file_manager = file_manager.lock().await;
 
-        match file_manager.change_directory(&path) {
+        match file_manager.change_directory(user_id, &path) {
             Ok(()) => {
-                let current_dir = file_manager.get_current_directory();
+                let current_dir = file_manager.get_current_directory(user_id);
                 bot.send_message(
                     msg.chat.id,
                     format!("📁 Changed directory to: {}", current_dir.display()),
@@ -358,28 +357,29 @@ impl BotManager {
     }
 
     async fn handle_download(
-        bot: teloxide::Bot,
+        bot: Bot,
         msg: Message,
         filename: String,
+        user_id: Id,
         file_manager: Arc<Mutex<FileManager>>,
     ) -> Result<(), BotError> {
         let file_manager = file_manager.lock().await;
 
-        if !file_manager.file_exists(&filename) {
+        if !file_manager.file_exists(user_id, &filename) {
             bot.send_message(msg.chat.id, "❌ File not found")
                 .await
                 .map_err(|e| BotError::TelegramError(e.to_string()))?;
             return Ok(());
         }
 
-        if !file_manager.is_file(&filename) {
+        if !file_manager.is_file(user_id, &filename) {
             bot.send_message(msg.chat.id, "❌ Cannot download directories")
                 .await
                 .map_err(|e| BotError::TelegramError(e.to_string()))?;
             return Ok(());
         }
 
-        let file_path = file_manager.get_file_path(&filename);
+        let file_path = file_manager.get_file_path(user_id, &filename);
 
         bot.send_document(msg.chat.id, teloxide::types::InputFile::file(&file_path))
             .await
@@ -389,13 +389,14 @@ impl BotManager {
     }
 
     async fn handle_exec(
-        bot: teloxide::Bot,
+        bot: Bot,
         msg: Message,
         command: String,
+        user_id: Id,
         file_manager: Arc<Mutex<FileManager>>,
     ) -> Result<(), BotError> {
         let file_manager = file_manager.lock().await;
-        let current_dir = file_manager.get_current_directory();
+        let current_dir = file_manager.get_current_directory(user_id);
 
         // Basic command execution - in production, you'd want more security
         let output = if cfg!(target_os = "windows") {
@@ -440,12 +441,13 @@ impl BotManager {
     }
 
     async fn handle_pwd(
-        bot: teloxide::Bot,
+        bot: Bot,
         msg: Message,
+        user_id: Id,
         file_manager: Arc<Mutex<FileManager>>,
     ) -> Result<(), BotError> {
         let file_manager = file_manager.lock().await;
-        let current_dir = file_manager.get_current_directory();
+        let current_dir = file_manager.get_current_directory(user_id);
 
         bot.send_message(
             msg.chat.id,
